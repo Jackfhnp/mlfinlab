@@ -49,7 +49,9 @@ class SequentialBaseForest(BaseEnsemble, MultiOutputMixin, metaclass=ABCMeta):
                  random_state=None,
                  verbose=0,
                  warm_start=False,
-                 class_weight=None):
+                 class_weight=None,
+                 bootstrapped_events,
+                 draw_subsample_prob):
         super().__init__(
             base_estimator=base_estimator,
             n_estimators=n_estimators,
@@ -62,6 +64,8 @@ class SequentialBaseForest(BaseEnsemble, MultiOutputMixin, metaclass=ABCMeta):
         self.verbose = verbose
         self.warm_start = warm_start
         self.class_weight = class_weight
+        self.bootstrapped_events = bootstrapped_events
+        self.draw_subsample_prob = draw_subsample_prob
 
     def apply(self, X):
         """
@@ -95,7 +99,7 @@ class SequentialBaseForest(BaseEnsemble, MultiOutputMixin, metaclass=ABCMeta):
 
         return sparse_hstack(indicators).tocsr(), n_nodes_ptr
 
-    def generate_sample_indices(self, bootstrapped_events, prob, random_state):
+    def generate_sample_indices(self, random_state):
         """
         This function applies Sequential Bootstrapping to generate samples for ensemble models.
         Uses mlfinlab.sampling.bootstrapping import seq_bootstrap which implements Sequential Bootstrapping described in
@@ -107,12 +111,13 @@ class SequentialBaseForest(BaseEnsemble, MultiOutputMixin, metaclass=ABCMeta):
         """
         random_instance = check_random_state(random_state)
         # Sequential Bootstrapping
-        random_sample_index = random_instance.choice(range(len(bootstrapped_events)), p=prob)
-        return bootstrapped_events[random_sample_index]
+        random_sample_index = random_instance.choice(range(len(self.bootstrapped_events)), p=self.draw_subsample_prob)
+        return self.bootstrapped_events[random_sample_index]
 
-    def generate_unsampled_indices(self, bootstrapped_events, prob, n_samples, random_state):
+
+    def generate_unsampled_indices(self, n_samples, random_state):
         """Private function used to forest._set_oob_score function."""
-        sample_indices = self.generate_sample_indices(bootstrapped_events, prob, random_state)
+        sample_indices = self.generate_sample_indices(self.bootstrapped_events, self.draw_subsample_prob, random_state)
         sample_counts = np.bincount(sample_indices, minlength=n_samples)
         unsampled_mask = sample_counts == 0
         indices_range = np.arange(n_samples)
@@ -154,7 +159,7 @@ class SequentialBaseForest(BaseEnsemble, MultiOutputMixin, metaclass=ABCMeta):
 
         return tree
 
-    def fit(self, X, y, bootstrapped_events, prob, sample_weight=None):
+    def fit(self, X, y, sample_weight=None):
         """
         This is a copy of fit function from sklearn. The only difference is instead of using
         standard bootstrapping method Sequential Bootstrapping is used instead
@@ -239,7 +244,7 @@ class SequentialBaseForest(BaseEnsemble, MultiOutputMixin, metaclass=ABCMeta):
             trees = Parallel(n_jobs=self.n_jobs, verbose=self.verbose,
                              **_joblib_parallel_args(prefer='threads'))(
                 delayed(self.parallel_build_trees)(
-                    t, self, X, y, bootstrapped_events, prob, sample_weight, i, len(trees),
+                    t, self, X, y, self.bootstrapped_events, self.draw_subsample_prob, sample_weight, i, len(trees),
                     verbose=self.verbose, class_weight=self.class_weight)
                 for i, t in enumerate(trees))
 
@@ -257,7 +262,7 @@ class SequentialBaseForest(BaseEnsemble, MultiOutputMixin, metaclass=ABCMeta):
         return self
 
     @abstractmethod
-    def _set_oob_score(self, X, y, bootstrapped_events, prob):
+    def _set_oob_score(self, X, y):
         """_set_oob_score function from sklearn copy"""
 
     def _validate_y_class_weight(self, y):
@@ -313,7 +318,9 @@ class SequentialForestClassifier(SequentialBaseForest, ClassifierMixin, metaclas
                  random_state=None,
                  verbose=0,
                  warm_start=False,
-                 class_weight=None):
+                 class_weight=None,
+                 bootstrapped_events,
+                 draw_subsample_prob):
         super().__init__(
             base_estimator,
             n_estimators=n_estimators,
@@ -324,9 +331,11 @@ class SequentialForestClassifier(SequentialBaseForest, ClassifierMixin, metaclas
             random_state=random_state,
             verbose=verbose,
             warm_start=warm_start,
-            class_weight=class_weight)
+            class_weight=class_weight,
+            bootstrapped_events=bootstrapped_events,
+            draw_subsample_prob=draw_subsample_prob)
 
-    def _set_oob_score(self, X, y, bootstrapped_events, prob):
+    def _set_oob_score(self, X, y):
         """
         _set_oob_score function copy from sklearn
         """
@@ -341,7 +350,7 @@ class SequentialForestClassifier(SequentialBaseForest, ClassifierMixin, metaclas
                        for k in range(self.n_outputs_)]
 
         for estimator in self.estimators_:
-            unsampled_indices = super().generate_unsampled_indices(bootstrapped_events, prob, n_samples,
+            unsampled_indices = super().generate_unsampled_indices(self.bootstrapped_events, self.draw_subsample_prob, n_samples,
                                                                    estimator.random_state)
             p_estimator = estimator.predict_proba(X[unsampled_indices, :],
                                                   check_input=False)
@@ -509,7 +518,9 @@ class SequentialForestRegressor(SequentialBaseForest, RegressorMixin, metaclass=
                  n_jobs=None,
                  random_state=None,
                  verbose=0,
-                 warm_start=False):
+                 warm_start=False,
+                 bootstrapped_events,
+                 draw_subsample_prob):
         super().__init__(
             base_estimator,
             n_estimators=n_estimators,
@@ -519,7 +530,9 @@ class SequentialForestRegressor(SequentialBaseForest, RegressorMixin, metaclass=
             n_jobs=n_jobs,
             random_state=random_state,
             verbose=verbose,
-            warm_start=warm_start)
+            warm_start=warm_start,
+            bootstrapped_events=bootstrapped_events,
+            draw_subsample_prob=draw_subsample_prob)
 
     def predict(self, X):
         """
@@ -549,7 +562,7 @@ class SequentialForestRegressor(SequentialBaseForest, RegressorMixin, metaclass=
 
         return y_hat
 
-    def _set_oob_score(self, X, y, bootstrapped_events, prob):
+    def _set_oob_score(self, X, y):
         """
         _set_oob_score from sklearn
         """
@@ -561,7 +574,7 @@ class SequentialForestRegressor(SequentialBaseForest, RegressorMixin, metaclass=
         n_predictions = np.zeros((n_samples, self.n_outputs_))
 
         for estimator in self.estimators_:
-            unsampled_indices = super().generate_unsampled_indices(bootstrapped_events, prob, n_samples,
+            unsampled_indices = super().generate_unsampled_indices(self.bootstrapped_events, self.draw_subsample_prob, n_samples,
                                                                    estimator.random_state)
             p_estimator = estimator.predict(
                 X[unsampled_indices, :], check_input=False)
@@ -616,7 +629,9 @@ class SequentialBootstrappingRandomForestClassifier(SequentialForestClassifier):
                  random_state=None,
                  verbose=0,
                  warm_start=False,
-                 class_weight=None):
+                 class_weight=None,
+                 bootstrapped_events,
+                 draw_subsample_prob):
         super().__init__(
             base_estimator=DecisionTreeClassifier(),
             n_estimators=n_estimators,
@@ -631,7 +646,9 @@ class SequentialBootstrappingRandomForestClassifier(SequentialForestClassifier):
             random_state=random_state,
             verbose=verbose,
             warm_start=warm_start,
-            class_weight=class_weight)
+            class_weight=class_weight,
+            bootstrapped_events=bootstrapped_events,
+            draw_subsample_prob=draw_subsample_prob)
 
         self.criterion = criterion
         self.max_depth = max_depth
@@ -665,7 +682,9 @@ class SequentialBootstrappingRandomForestRegressor(SequentialForestRegressor):
                  n_jobs=None,
                  random_state=None,
                  verbose=0,
-                 warm_start=False):
+                 warm_start=False,
+                 bootstrapped_events,
+                 draw_subsample_prob):
         super().__init__(
             base_estimator=DecisionTreeRegressor(),
             n_estimators=n_estimators,
@@ -679,7 +698,9 @@ class SequentialBootstrappingRandomForestRegressor(SequentialForestRegressor):
             n_jobs=n_jobs,
             random_state=random_state,
             verbose=verbose,
-            warm_start=warm_start)
+            warm_start=warm_start,
+            bootstrapped_events=bootstrapped_events,
+            draw_subsample_prob=draw_subsample_prob)
 
         self.criterion = criterion
         self.max_depth = max_depth
@@ -714,7 +735,9 @@ class SequentialBootstrappingExtraTreesClassifier(SequentialForestClassifier):
                  random_state=None,
                  verbose=0,
                  warm_start=False,
-                 class_weight=None):
+                 class_weight=None,
+                 bootstrapped_events,
+                 draw_subsample_prob):
         super().__init__(
             base_estimator=ExtraTreeClassifier(),
             n_estimators=n_estimators,
@@ -729,7 +752,9 @@ class SequentialBootstrappingExtraTreesClassifier(SequentialForestClassifier):
             random_state=random_state,
             verbose=verbose,
             warm_start=warm_start,
-            class_weight=class_weight)
+            class_weight=class_weight,
+            bootstrapped_events=bootstrapped_events,
+            draw_subsample_prob=draw_subsample_prob)
 
         self.criterion = criterion
         self.max_depth = max_depth
@@ -763,7 +788,9 @@ class SequentialBootstrappingExtraTreesRegressor(SequentialForestRegressor):
                  n_jobs=None,
                  random_state=None,
                  verbose=0,
-                 warm_start=False):
+                 warm_start=False,
+                 bootstrapped_events,
+                 draw_subsample_prob):
         super().__init__(
             base_estimator=ExtraTreeRegressor(),
             n_estimators=n_estimators,
@@ -777,7 +804,9 @@ class SequentialBootstrappingExtraTreesRegressor(SequentialForestRegressor):
             n_jobs=n_jobs,
             random_state=random_state,
             verbose=verbose,
-            warm_start=warm_start)
+            warm_start=warm_start,
+            bootstrapped_events=bootstrapped_events,
+            draw_subsample_prob=draw_subsample_prob)
 
         self.criterion = criterion
         self.max_depth = max_depth
