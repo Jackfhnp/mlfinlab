@@ -49,12 +49,12 @@ class TestChapter6(unittest.TestCase):
         triple_labels = get_bins(triple_barrier_events, self.data['close'])
 
         # Training set
-        X = self.data[["close", "cum_vol"]].loc[triple_labels.index]
-        y = triple_labels["bin"]
+        features = self.data[["close", "cum_vol"]].loc[triple_labels.index]
+        target = triple_labels["bin"]
 
         clf = SeqBootstrapRandomForest(triple_barrier_events=triple_barrier_events)
-        clf.fit(X, y)
-        pred_target = clf.predict(X)
+        clf.fit(features, target)
+        pred_target = clf.predict(features)
 
         # Assert data type
         self.assertTrue(pred_target.dtype == int)

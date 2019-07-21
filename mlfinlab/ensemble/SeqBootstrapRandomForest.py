@@ -1,24 +1,26 @@
-import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+"""
+A edited class of RandomForest to implement Sequential Bootstrapping
+"""
 
 from warnings import catch_warnings, simplefilter, warn
 
 import numpy as np
+from numpy import float32
+from numpy import float64
 from scipy.sparse import issparse
 
-from mlfinlab.sampling.bootstrapping import get_ind_matrix
-from mlfinlab.sampling.bootstrapping import seq_bootstrap
-
 from sklearn.utils._joblib import Parallel, delayed
-from sklearn.tree._tree import DTYPE, DOUBLE
 from sklearn.utils import check_random_state, check_array, compute_sample_weight
 from sklearn.exceptions import DataConversionWarning
 from sklearn.utils.fixes import _joblib_parallel_args
+from sklearn.ensemble import RandomForestClassifier
 
 from mlfinlab.sampling.bootstrapping import get_ind_matrix
 from mlfinlab.sampling.bootstrapping import seq_bootstrap
 # ———————————————————————————————————————
 
+DTYPE = float32
+DOUBLE = float64
 MAX_INT = np.iinfo(np.int32).max
 
 
@@ -41,33 +43,15 @@ def _generate_unsampled_indices(random_state, n_samples):
     return unsampled_indices
 
 
-def _custom_parallel_build_trees(tree, forest, X, y, sample_weight, tree_idx, n_trees,
-                                 verbose=0, class_weight=None):
+def custom_parallel_build_trees(tree, forest, features, target, sample_weight, tree_idx, n_trees,
+                                verbose=0, class_weight=None):
     # Edited to include Sequential Bootstraping Case
     """Private function used to fit a single tree in parallel."""
     if verbose > 1:
         print("building tree %d of %d" % (tree_idx + 1, n_trees))
 
-    if forest.bootstrap:
-        n_samples = X.shape[0]
-        if sample_weight is None:
-            curr_sample_weight = np.ones((n_samples,), dtype=np.float64)
-        else:
-            curr_sample_weight = sample_weight.copy()
-        indices = _generate_sample_indices(tree.random_state, n_samples)
-        sample_counts = np.bincount(indices, minlength=n_samples)
-        curr_sample_weight *= sample_counts
-
-        if class_weight == 'subsample':
-            with catch_warnings():
-                simplefilter('ignore', DeprecationWarning)
-                curr_sample_weight *= compute_sample_weight('auto', y, indices)
-        elif class_weight == 'balanced_subsample':
-            curr_sample_weight *= compute_sample_weight('balanced', y, indices)
-
-        tree.fit(X, y, sample_weight=curr_sample_weight, check_input=False)
-    elif forest.seq_bootstrap:
-        n_samples = X.shape[0]
+    if forest.triple_barrier_events is not None:
+        n_samples = features.shape[0]
         if sample_weight is None:
             curr_sample_weight = np.ones((n_samples,), dtype=np.float64)
         else:
@@ -81,19 +65,22 @@ def _custom_parallel_build_trees(tree, forest, X, y, sample_weight, tree_idx, n_
         if class_weight == 'subsample':
             with catch_warnings():
                 simplefilter('ignore', DeprecationWarning)
-                curr_sample_weight *= compute_sample_weight('auto', y, indices)
+                curr_sample_weight *= compute_sample_weight('auto', target, indices)
         elif class_weight == 'balanced_subsample':
-            curr_sample_weight *= compute_sample_weight('balanced', y, indices)
+            curr_sample_weight *= compute_sample_weight('balanced', target, indices)
 
-        tree.fit(X, y, sample_weight=curr_sample_weight, check_input=False)
+        tree.fit(features, target, sample_weight=curr_sample_weight, check_input=False)
     else:
-        tree.fit(X, y, sample_weight=sample_weight, check_input=False)
+        tree.fit(features, target, sample_weight=sample_weight, check_input=False)
 
     return tree
 
 
 class SeqBootstrapRandomForest(RandomForestClassifier):
-    # Add seq_bootstrap parameter to constructor function
+    """
+    Random Forest Class using sequential bootstrapping
+    Add seq_bootstrapping parameter to constructor function
+    """
     def __init__(self,
                  n_estimators='warn',
                  criterion="gini",
@@ -105,8 +92,6 @@ class SeqBootstrapRandomForest(RandomForestClassifier):
                  max_leaf_nodes=None,
                  min_impurity_decrease=0.,
                  min_impurity_split=None,
-                 bootstrap=False,
-                 seq_bootstrap=True,
                  triple_barrier_events=None,
                  oob_score=False,
                  n_jobs=None,
@@ -116,7 +101,6 @@ class SeqBootstrapRandomForest(RandomForestClassifier):
                  class_weight=None):
         super().__init__(
                         n_estimators=n_estimators,
-                        bootstrap=bootstrap,
                         oob_score=oob_score,
                         n_jobs=n_jobs,
                         random_state=random_state,
@@ -133,21 +117,20 @@ class SeqBootstrapRandomForest(RandomForestClassifier):
         self.max_leaf_nodes = max_leaf_nodes
         self.min_impurity_decrease = min_impurity_decrease
         self.min_impurity_split = min_impurity_split
-        self.seq_bootstrap = seq_bootstrap
         self.triple_barrier_events = triple_barrier_events
 
-    def fit(self, X, y, sample_weight=None):
+    def fit(self, features, target, sample_weight=None):
         # Edit original fit method to use custom _parallel_build_trees function (line: 279)
 
-        """Build a forest of trees from the training set (X, y).
+        """Build a forest of trees from the training set (features, target).
         Parameters
         ----------
-        X : array-like or sparse matrix of shape = [n_samples, n_features]
+        features : array-like or sparse matrix of shape = [n_samples, n_features]
             The training input samples. Internally, its dtype will be converted
             to ``dtype=np.float32``. If a sparse matrix is provided, it will be
             converted into a sparse ``csc_matrix``.
-        y : array-like, shape = [n_samples] or [n_samples, n_outputs]
-            The target values (class labels in classification, real numbers in
+        target : array-like, shape = [n_samples] or [n_samples, n_outputs]
+            The features values (class labels in classification, real numbers in
             regression).
         sample_weight : array-like, shape = [n_samples] or None
             Sample weights. If None, then samples are equally weighted. Splits
@@ -166,36 +149,36 @@ class SeqBootstrapRandomForest(RandomForestClassifier):
             self.n_estimators = 10
 
         # Validate or convert input data
-        X = check_array(X, accept_sparse="csc", dtype=DTYPE)
-        y = check_array(y, accept_sparse='csc', ensure_2d=False, dtype=None)
+        features = check_array(features, accept_sparse="csc", dtype=DTYPE)
+        target = check_array(target, accept_sparse='csc', ensure_2d=False, dtype=None)
         if sample_weight is not None:
             sample_weight = check_array(sample_weight, ensure_2d=False)
-        if issparse(X):
+        if issparse(features):
             # Pre-sort indices to avoid that each individual tree of the
             # ensemble sorts the indices.
-            X.sort_indices()
+            features.sort_indices()
 
         # Remap output
-        self.n_features_ = X.shape[1]
+        self.n_features_ = features.shape[1]
 
-        y = np.atleast_1d(y)
-        if y.ndim == 2 and y.shape[1] == 1:
-            warn("A column-vector y was passed when a 1d array was"
-                 " expected. Please change the shape of y to "
+        target = np.atleast_1d(target)
+        if target.ndim == 2 and target.shape[1] == 1:
+            warn("A column-vector target was passed when a 1d array was"
+                 " expected. Please change the shape of target to "
                  "(n_samples,), for example using ravel().",
                  DataConversionWarning, stacklevel=2)
 
-        if y.ndim == 1:
+        if target.ndim == 1:
             # reshape is necessary to preserve the data contiguity against vs
             # [:, np.newaxis] that does not.
-            y = np.reshape(y, (-1, 1))
+            target = np.reshape(target, (-1, 1))
 
-        self.n_outputs_ = y.shape[1]
+        self.n_outputs_ = target.shape[1]
 
-        y, expanded_class_weight = self._validate_y_class_weight(y)
+        target, expanded_class_weight = self._validate_y_class_weight(target)
 
-        if getattr(y, "dtype", None) != DOUBLE or not y.flags.contiguous:
-            y = np.ascontiguousarray(y, dtype=DOUBLE)
+        if getattr(target, "dtype", None) != DOUBLE or not target.flags.contiguous:
+            target = np.ascontiguousarray(target, dtype=DOUBLE)
 
         if expanded_class_weight is not None:
             if sample_weight is not None:
@@ -222,7 +205,6 @@ class SeqBootstrapRandomForest(RandomForestClassifier):
             raise ValueError('n_estimators=%d must be larger or equal to '
                              'len(estimators_)=%d when warm_start==True'
                              % (self.n_estimators, len(self.estimators_)))
-
         elif n_more_estimators == 0:
             warn("Warm-start fitting without increasing n_estimators does not "
                  "fit new trees.")
@@ -242,18 +224,24 @@ class SeqBootstrapRandomForest(RandomForestClassifier):
             # that case. However, for joblib 0.12+ we respect any
             # parallel_backend contexts set at a higher level,
             # since correctness does not rely on using threads.
-            trees = Parallel(n_jobs=self.n_jobs, verbose=self.verbose,
-                             **_joblib_parallel_args(prefer='threads'))(
-                delayed(_custom_parallel_build_trees)(
-                    t, self, X, y, sample_weight, i, len(trees),
-                    verbose=self.verbose, class_weight=self.class_weight)
-                for i, t in enumerate(trees))
+            trees = Parallel(n_jobs=self.n_jobs,
+                             verbose=self.verbose,
+                             **_joblib_parallel_args(prefer='threads'))\
+                (delayed(custom_parallel_build_trees)(t,
+                                                      self,
+                                                      features,
+                                                      target,
+                                                      sample_weight,
+                                                      i,
+                                                      len(trees),
+                                                      verbose=self.verbose, class_weight=self.class_weight)
+                 for i, t in enumerate(trees))
 
             # Collect newly grown trees
             self.estimators_.extend(trees)
 
         if self.oob_score:
-            self._set_oob_score(X, y)
+            self._set_oob_score(features, target)
 
         # Decapsulate classes_ attributes
         if hasattr(self, "classes_") and self.n_outputs_ == 1:
